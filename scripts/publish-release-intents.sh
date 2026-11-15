@@ -231,10 +231,12 @@ publish_one() {
 	if [[ "$recovery_mode" == true && "$GITHUB_WORKFLOW_REF" == *@refs/heads/prototype/inspect-publish-failure ]]; then
 		sbom_file="$work_dir/$version.sbom.json"
 		provenance_file="$work_dir/$version.provenance.json"
-		docker buildx imagetools inspect "$ref" --format '{{json .SBOM.SPDX}}' > "$sbom_file"
-		docker buildx imagetools inspect "$ref" --format '{{json .Provenance.SLSA}}' > "$provenance_file"
-		printf 'SBOM: %s\n' "$(cat "$sbom_file")"
-		printf 'Provenance: %s\n' "$(cat "$provenance_file")"
+		docker buildx imagetools inspect "$ref" --format '{{json .SBOM}}' > "$sbom_file"
+		docker buildx imagetools inspect "$ref" --format '{{json .Provenance}}' > "$provenance_file"
+		for platform in linux/amd64 linux/arm64; do
+			printf 'SBOM %s: %s\n' "$platform" "$(jq -c --arg platform "$platform" '.[$platform]' "$sbom_file")"
+			printf 'Provenance %s: %s\n' "$platform" "$(jq -c --arg platform "$platform" '.[$platform]' "$provenance_file")"
+		done
 		docker buildx imagetools inspect "$ref" --raw > "$work_dir/$version.index.json"
 		jq -c '{mediaType, manifests: [.manifests[]? | {mediaType, digest, platform, annotations}]}' "$work_dir/$version.index.json"
 		echo "Diagnostic branch: stopping before any publication writes"
