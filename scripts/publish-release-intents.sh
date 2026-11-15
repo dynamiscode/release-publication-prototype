@@ -239,6 +239,25 @@ publish_one() {
 		done
 		docker buildx imagetools inspect "$ref" --raw > "$work_dir/$version.index.json"
 		jq -c '{mediaType, manifests: [.manifests[]? | {mediaType, digest, platform, annotations}]}' "$work_dir/$version.index.json"
+		for platform in linux/amd64 linux/arm64; do
+			child_digest=$(jq -r --arg platform "$platform" '
+				.manifests[]
+				| select(.platform.os + "/" + .platform.architecture == $platform)
+				| .digest
+			' "$work_dir/$version.index.json")
+			child_ref="$image@$child_digest"
+			for predicate_type in https://spdx.dev/Document https://slsa.dev/provenance/v0.2; do
+				attestation_file="$work_dir/attestation.jsonl"
+				error_file="$work_dir/attestation.error"
+				if cosign download attestation "$child_ref" --predicate-type "$predicate_type" >"$attestation_file" 2>"$error_file"; then
+					printf 'Cosign attestations %s %s: ' "$platform" "$predicate_type"
+					jq -sc '[.[] | .payload | @base64d | fromjson | {predicateType, subject: [.subject[].digest], predicateKeys: (.predicate | keys)}]' "$attestation_file"
+				else
+					status=$?
+					printf 'Cosign download %s %s: status=%s stderr=%s\n' "$platform" "$predicate_type" "$status" "$(cat "$error_file")"
+				fi
+			done
+		done
 		echo "Diagnostic branch: stopping before any publication writes"
 		return 0
 	fi
