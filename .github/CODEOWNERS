@@ -1,0 +1,5 @@
+/.github/workflows/release-prototype.yml @davidlondono
+/cmd/ @davidlondono
+/internal/releaseplan/ @davidlondono
+/releases/ @davidlondono
+/scripts/ @davidlondono

@@ -1,0 +1,316 @@
+name: Release publication prototype
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Prototype operation
+        required: true
+        type: choice
+        options:
+          - prepare
+          - refresh
+          - gate
+          - retry
+      version:
+        description: Stable synthetic release version
+        required: false
+        default: v0.1.0
+        type: string
+      pr_number:
+        description: Release PR number for gate
+        required: false
+        type: string
+      fail_after:
+        description: Inject one recovery failure during prepare/publish
+        required: false
+        default: none
+        type: choice
+        options:
+          - none
+          - after-candidate
+          - after-version
+          - after-release
+          - after-first-alias
+  push:
+    branches:
+      - prototype/merge-authorized
+    paths:
+      - releases/**
+  pull_request:
+    branches:
+      - prototype/merge-authorized
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-publication-prototype-${{ (github.event_name == 'push' || inputs.mode == 'retry') && 'publish' || 'pr-management' }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'prepare'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Prepare release PR and dispatch exact-head gate
+        env:
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          FAIL_AFTER: ${{ inputs.fail_after }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: ./scripts/release-pr.sh prepare
+
+  release-gate:
+    name: release-gate
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'gate')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.3
+          cache: false
+      - name: Verify exact release PR head
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: ./scripts/release-pr.sh gate
+      - name: Test ordinary pull request
+        if: github.event_name == 'pull_request'
+        run: go test ./...
+
+  refresh:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'refresh'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Update bot-authored release PR and redispatch gate
+        env:
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: ./scripts/release-pr.sh refresh
+
+  discover:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'retry')
+    runs-on: ubuntu-24.04
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      has_intents: ${{ steps.scan.outputs.has_intents }}
+      intents: ${{ steps.scan.outputs.intents }}
+      intent_matrix: ${{ steps.scan.outputs.intent_matrix }}
+      smoke_matrix: ${{ steps.scan.outputs.smoke_matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Discover authorized incomplete releases
+        id: scan
+        env:
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          intents="$(./scripts/discover-release-intents.sh)"
+          has_intents="$(jq -r 'length > 0' <<<"$intents")"
+          intent_matrix="$(jq -c 'if length == 0 then [{"version":"skip"}] else . end' <<<"$intents")"
+          smoke_matrix="$(jq -c '
+            if length == 0 then
+              [{"version":"skip","merge_sha":"skip","arch":"amd64","runner":"ubuntu-24.04"}]
+            else
+              [.[] as $intent
+                | {version:$intent.version,merge_sha:$intent.merge_sha,arch:"amd64",runner:"ubuntu-24.04"},
+                  {version:$intent.version,merge_sha:$intent.merge_sha,arch:"arm64",runner:"ubuntu-24.04-arm"}]
+            end' <<<"$intents")"
+          printf 'has_intents=%s\n' "$has_intents" >> "$GITHUB_OUTPUT"
+          printf 'intents=%s\n' "$intents" >> "$GITHUB_OUTPUT"
+          printf 'intent_matrix=%s\n' "$intent_matrix" >> "$GITHUB_OUTPUT"
+          printf 'smoke_matrix=%s\n' "$smoke_matrix" >> "$GITHUB_OUTPUT"
+
+  build-candidates:
+    needs: discover
+    if: needs.discover.outputs.has_intents == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        intent: ${{ fromJSON(needs.discover.outputs.intent_matrix) }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          ref: ${{ matrix.intent.merge_sha }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.3
+          cache: false
+      - name: Install crane
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Check for immutable candidate
+        id: candidate
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          MERGE_SHA: ${{ matrix.intent.merge_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${IMAGE,,}"
+          tag="candidate-$MERGE_SHA"
+          error_file="$RUNNER_TEMP/crane-error"
+          set +e
+          digest="$(crane digest "$image:$tag" 2>"$error_file")"
+          status=$?
+          set -e
+          if (( status == 0 )); then
+            printf 'exists=true\ndigest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if grep -Eiq '404|NAME_UNKNOWN|MANIFEST_UNKNOWN' "$error_file"; then
+            printf 'exists=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cat "$error_file" >&2
+          exit "$status"
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        if: steps.candidate.outputs.exists == 'false'
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ghcr.io/${{ github.repository }}:candidate-${{ matrix.intent.merge_sha }}
+          build-args: |
+            VERSION=${{ matrix.intent.version }}
+            SOURCE_SHA=${{ matrix.intent.merge_sha }}
+      - name: Inject candidate interruption
+        if: steps.candidate.outputs.exists == 'false' && matrix.intent.fail_after == 'after-candidate' && inputs.mode != 'retry'
+        run: exit 75
+
+  smoke-candidates:
+    needs:
+      - discover
+      - build-candidates
+    if: needs.discover.outputs.has_intents == 'true'
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.discover.outputs.smoke_matrix) }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.3
+          cache: false
+      - name: Install crane
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Smoke-test exact image digest natively
+        env:
+          ARCH: ${{ matrix.platform.arch }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          MERGE_SHA: ${{ matrix.platform.merge_sha }}
+          VERSION: ${{ matrix.platform.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${IMAGE,,}"
+          digest="$(crane digest "$image:candidate-$MERGE_SHA")"
+          ref="$image@$digest"
+          docker pull --platform "linux/$ARCH" "$ref"
+          labels="$(docker image inspect "$ref" --format '{{json .Config.Labels}}')"
+          jq -e --arg version "$VERSION" --arg sha "$MERGE_SHA" \
+            '.["org.opencontainers.image.version"] == $version and .["org.opencontainers.image.revision"] == $sha' \
+            <<<"$labels"
+          output="$(docker run --rm --platform "linux/$ARCH" --entrypoint /synthetic "$ref")"
+          grep -F "release=$VERSION source=$MERGE_SHA os=linux arch=$ARCH" <<<"$output"
+
+  publish:
+    needs:
+      - discover
+      - build-candidates
+      - smoke-candidates
+    if: needs.discover.outputs.has_intents == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      checks: read
+      contents: write
+      id-token: write
+      packages: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.3
+          cache: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+      - name: Install crane
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish authorized releases
+        env:
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          INTENTS: ${{ needs.discover.outputs.intents }}
+          RECOVERY_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'retry' }}
+        run: |
+          set -euo pipefail
+          image="${IMAGE,,}"
+          intents_file="$RUNNER_TEMP/intents.json"
+          printf '%s\n' "$INTENTS" > "$intents_file"
+          IMAGE="$image" ./scripts/publish-release-intents.sh "$intents_file" "$image" "$RECOVERY_MODE"
