@@ -238,6 +238,8 @@ publish_one() {
 	provenance_file="$work_dir/$version.provenance.json"
 	docker buildx imagetools inspect "$ref" --format '{{json .SBOM.SPDX}}' > "$sbom_file"
 	docker buildx imagetools inspect "$ref" --format '{{json .Provenance.SLSA}}' > "$provenance_file"
+	printf 'SBOM summary: %s\n' "$(jq -c '{type: type, keys: (if type == "object" then keys else [] end)}' "$sbom_file")"
+	printf 'Provenance summary: %s\n' "$(jq -c '{type: type, keys: (if type == "object" then keys else [] end)}' "$provenance_file")"
 	jq -e 'type == "object"' "$sbom_file" >/dev/null
 	jq -e 'type == "object"' "$provenance_file" >/dev/null
 	jq -e --arg revision "$merge_sha" '
