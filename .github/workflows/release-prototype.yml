@@ -12,6 +12,7 @@ on:
           - refresh
           - gate
           - retry
+          - publisher-fix-pr
       version:
         description: Stable synthetic release version
         required: false
@@ -67,6 +68,60 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: ./scripts/release-pr.sh prepare
+
+  publisher-fix-pr:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'publisher-fix-pr'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Open bot-authored publisher fix PR
+        env:
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          FIX_BRANCH: automation/publisher-attestation-fix
+        run: |
+          set -euo pipefail
+          fix_sha=$(git rev-parse HEAD^)
+          base_sha=$(git ls-remote origin "refs/heads/$BASE_BRANCH" | awk 'NR == 1 { print $1 }')
+          [[ -n "$base_sha" ]] || { echo "Could not resolve base branch $BASE_BRANCH" >&2; exit 1; }
+          [[ $(git rev-parse "$fix_sha^") == "$base_sha" ]] || {
+            echo "Publisher fix is not based on current $BASE_BRANCH" >&2
+            exit 1
+          }
+          fix_tree=$(git rev-parse "$fix_sha^{tree}")
+          if existing_pr=$(gh pr list --base "$BASE_BRANCH" --head "$FIX_BRANCH" --state open --json number --jq '.[0].number // empty') && [[ -n "$existing_pr" ]]; then
+            echo "Publisher fix PR #$existing_pr already exists"
+            exit 0
+          fi
+          if git fetch --quiet origin "refs/heads/$FIX_BRANCH"; then
+            pr_head=$(git rev-parse FETCH_HEAD)
+            [[ $(git rev-parse "$pr_head^{tree}") == "$fix_tree" && $(git rev-parse "$pr_head^") == "$base_sha" ]] || {
+              echo "Existing $FIX_BRANCH does not match the publisher fix" >&2
+              exit 1
+            }
+          else
+            git switch --create "$FIX_BRANCH" "origin/$BASE_BRANCH"
+            git cherry-pick --no-commit "$fix_sha"
+            git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m 'fix(release): validate platform attestations'
+            pr_head=$(git rev-parse HEAD)
+            [[ $(git rev-parse "$pr_head^{tree}") == "$fix_tree" ]] || {
+              echo "Created publisher fix tree differs from expected" >&2
+              exit 1
+            }
+            git push origin "$FIX_BRANCH"
+          fi
+          gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$FIX_BRANCH" \
+            --title 'fix(release): validate per-platform attestations' \
+            --body 'Fixes Buildx per-platform SBOM/provenance extraction and validates exact Cosign attestation subjects and predicates. Includes a mock regression for idempotent retries and conflicts.'
 
   release-gate:
     name: release-gate
