@@ -228,6 +228,17 @@ publish_one() {
 	ref="$image@$digest"
 	echo "Verifying $version from merge $merge_sha at $ref"
 
+	if [[ "$recovery_mode" == true && "$GITHUB_WORKFLOW_REF" == *@refs/heads/prototype/inspect-publish-failure ]]; then
+		sbom_file="$work_dir/$version.sbom.json"
+		provenance_file="$work_dir/$version.provenance.json"
+		docker buildx imagetools inspect "$ref" --format '{{json .SBOM.SPDX}}' > "$sbom_file"
+		docker buildx imagetools inspect "$ref" --format '{{json .Provenance.SLSA}}' > "$provenance_file"
+		printf 'SBOM: %s\n' "$(cat "$sbom_file")"
+		printf 'Provenance: %s\n' "$(cat "$provenance_file")"
+		echo "Diagnostic branch: stopping before any publication writes"
+		return 0
+	fi
+
 	if [[ "$fail_after" == after-candidate ]]; then
 		echo "Injected failure after candidate image" >&2
 		return 75
