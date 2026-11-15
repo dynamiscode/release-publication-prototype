@@ -32,20 +32,38 @@ prepare)
 	branch="release/$version"
 	pr_number=$(gh pr list --state all --base "$base_branch" --head "$GITHUB_REPOSITORY_OWNER:$branch" --json number --jq '.[0].number // empty')
 	if [[ -z "$pr_number" ]]; then
-		git fetch --quiet origin "$base_branch"
-		git switch --create "$branch" "origin/$base_branch"
-		mkdir -p releases
-		jq -n \
-			--arg version "$version" \
-			--arg source_sha "$GITHUB_SHA" \
-			--arg fail_after "$fail_after" \
-			'{version:$version,source_sha:$source_sha,revision:1,test_fail_after:$fail_after}' \
-			> "releases/$version.json"
-		git config user.name "github-actions[bot]"
-		git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-		git add "releases/$version.json"
-		git commit -m "chore(release): prepare $version"
-		git push origin "$branch"
+		if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+			git fetch --quiet origin "$branch"
+			git switch --create "$branch" "origin/$branch"
+			jq -e \
+				--arg version "$version" \
+				--arg fail_after "$fail_after" \
+				'.version == $version and .revision == 1 and .test_fail_after == $fail_after and (.source_sha | strings | length == 40)' \
+				"releases/$version.json" >/dev/null || {
+				echo "existing release branch does not match requested intent: $branch" >&2
+				exit 1
+			}
+			source_sha=$(jq -r '.source_sha' "releases/$version.json")
+			git merge-base --is-ancestor "$source_sha" "$GITHUB_SHA" || {
+				echo "existing release intent source is not an ancestor of $GITHUB_SHA" >&2
+				exit 1
+			}
+		else
+			git fetch --quiet origin "$base_branch"
+			git switch --create "$branch" "origin/$base_branch"
+			mkdir -p releases
+			jq -n \
+				--arg version "$version" \
+				--arg source_sha "$GITHUB_SHA" \
+				--arg fail_after "$fail_after" \
+				'{version:$version,source_sha:$source_sha,revision:1,test_fail_after:$fail_after}' \
+				> "releases/$version.json"
+			git config user.name "github-actions[bot]"
+			git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+			git add "releases/$version.json"
+			git commit -m "chore(release): prepare $version"
+			git push origin "$branch"
+		fi
 		gh pr create \
 			--base "$base_branch" \
 			--head "$branch" \
