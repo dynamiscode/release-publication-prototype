@@ -235,6 +235,8 @@ publish_one() {
 		docker buildx imagetools inspect "$ref" --format '{{json .Provenance.SLSA}}' > "$provenance_file"
 		printf 'SBOM: %s\n' "$(cat "$sbom_file")"
 		printf 'Provenance: %s\n' "$(cat "$provenance_file")"
+		docker buildx imagetools inspect "$ref" --raw > "$work_dir/$version.index.json"
+		jq -c '{mediaType, manifests: [.manifests[]? | {mediaType, digest, platform, annotations}]}' "$work_dir/$version.index.json"
 		echo "Diagnostic branch: stopping before any publication writes"
 		return 0
 	fi
