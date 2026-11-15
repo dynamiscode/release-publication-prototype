@@ -34,36 +34,70 @@ sign_and_verify_image() {
 		"$ref"
 }
 
+attestation_matches() {
+	local download_file=$1
+	local predicate_type=$2
+	local predicate_file=$3
+	local subject_digest=$4
+
+	jq -e -s \
+		--arg predicate_type "$predicate_type" \
+		--arg subject_digest "${subject_digest#sha256:}" \
+		--slurpfile expected "$predicate_file" '
+			length > 0 and all(.[];
+				(.payload | @base64d | fromjson) as $statement
+				| $statement.predicateType == $predicate_type
+				and ($statement.subject | length) == 1
+				and $statement.subject[0].digest.sha256 == $subject_digest
+				and $statement.predicate == $expected[0]
+			)
+		' "$download_file" >/dev/null
+}
+
 attest_and_verify() {
 	local ref=$1
 	local identity=$2
 	local predicate_type=$3
 	local predicate_file=$4
+	local subject_digest=$5
 	local download_file error_file expected_error actual_error status
 
 	download_file=$(mktemp "$work_dir/attestation.XXXXXX")
 	error_file=$(mktemp "$work_dir/attestation-error.XXXXXX")
-	set +e
-	cosign download attestation "$ref" --predicate-type "$predicate_type" >"$download_file" 2>"$error_file"
-	status=$?
-	set -e
-	if [[ "$status" != 0 ]]; then
-		expected_error="error during command execution: no attestations with predicate type '$predicate_type' found"
+	expected_error="Error: no attestations with predicate type '$predicate_type' found"
+	if cosign download attestation "$ref" --predicate-type "$predicate_type" >"$download_file" 2>"$error_file"; then
+		if [[ ! -s "$download_file" ]]; then
+			echo "Cosign attestation download returned no data for $predicate_type" >&2
+			return 1
+		fi
+		if ! attestation_matches "$download_file" "$predicate_type" "$predicate_file" "$subject_digest"; then
+			echo "Existing $predicate_type attestation conflicts with expected subject or predicate for $ref" >&2
+			return 1
+		fi
+	else
+		status=$?
 		actual_error=$(sed -E 's/^[0-9]{4}\/[0-9]{2}\/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} //' "$error_file")
 		if [[ -s "$download_file" || "$actual_error" != "$expected_error" ]]; then
 			cat "$error_file" >&2
 			return "$status"
 		fi
 		cosign attest --yes --type "$predicate_type" --predicate "$predicate_file" "$ref"
-	elif [[ ! -s "$download_file" ]]; then
-		echo "Cosign attestation download returned no data for $predicate_type" >&2
-		return 1
 	fi
+
 	cosign verify-attestation \
 		--type "$predicate_type" \
 		--certificate-identity "$identity" \
 		--certificate-oidc-issuer "$oidc_issuer" \
-		"$ref"
+		"$ref" >/dev/null
+
+	cosign download attestation "$ref" --predicate-type "$predicate_type" >"$download_file" 2>"$error_file" || {
+		cat "$error_file" >&2
+		return 1
+	}
+	if ! attestation_matches "$download_file" "$predicate_type" "$predicate_file" "$subject_digest"; then
+		echo "Verified $predicate_type attestation does not match expected subject or predicate for $ref" >&2
+		return 1
+	fi
 }
 
 ensure_git_tag() {
@@ -215,7 +249,7 @@ publish_one() {
 	local version merge_sha pr_number fail_after candidate_tag digest ref
 	local asset_dir existing_dir release_json release_error release_exists
 	local expected_names actual_names release_id
-	local sbom_file provenance_file
+	local index_file sbom_map_file provenance_map_file source_url platform child_digest child_ref sbom_file provenance_file
 
 	version=$(jq -r '.version' <<<"$intent")
 	merge_sha=$(jq -r '.merge_sha' <<<"$intent")
@@ -234,21 +268,39 @@ publish_one() {
 	fi
 
 	sign_and_verify_image "$ref" "$workflow_ref"
-	sbom_file="$work_dir/$version.sbom.json"
-	provenance_file="$work_dir/$version.provenance.json"
-	docker buildx imagetools inspect "$ref" --format '{{json .SBOM.SPDX}}' > "$sbom_file"
-	docker buildx imagetools inspect "$ref" --format '{{json .Provenance.SLSA}}' > "$provenance_file"
-	jq -e 'type == "object"' "$sbom_file" >/dev/null
-	jq -e 'type == "object"' "$provenance_file" >/dev/null
-	jq -e --arg revision "$merge_sha" '
-		.metadata["https://mobyproject.org/buildkit@v1#metadata"].vcs.revision == $revision and
-		(.metadata["https://mobyproject.org/buildkit@v1#metadata"].vcs.source | type == "string" and length > 0)
-	' "$provenance_file" >/dev/null || {
-		echo "BuildKit provenance does not identify merge commit $merge_sha" >&2
-		return 1
-	}
-	attest_and_verify "$ref" "$workflow_ref" https://spdx.dev/Document "$sbom_file"
-	attest_and_verify "$ref" "$workflow_ref" https://slsa.dev/provenance/v0.2 "$provenance_file"
+	index_file="$work_dir/$version.index.json"
+	sbom_map_file="$work_dir/$version.sbom-map.json"
+	provenance_map_file="$work_dir/$version.provenance-map.json"
+	source_url="https://github.com/$repo"
+	docker buildx imagetools inspect "$ref" --raw > "$index_file"
+	docker buildx imagetools inspect "$ref" --format '{{json .SBOM}}' > "$sbom_map_file"
+	docker buildx imagetools inspect "$ref" --format '{{json .Provenance}}' > "$provenance_map_file"
+	for platform in linux/amd64 linux/arm64; do
+		child_digest=$(jq -er --arg platform "$platform" '
+			($platform | split("/")) as $parts
+			| [.manifests[] | select(.platform.os == $parts[0] and .platform.architecture == $parts[1]) | .digest] as $digests
+			| if ($digests | length) == 1 then $digests[0] else error("expected one manifest for " + $platform) end
+		' "$index_file")
+		[[ "$child_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+			echo "Invalid $platform manifest digest: $child_digest" >&2
+			return 1
+		}
+		child_ref="$image@$child_digest"
+		sbom_file="$work_dir/$version-${platform//\//-}.sbom.json"
+		provenance_file="$work_dir/$version-${platform//\//-}.provenance.json"
+		jq -e --arg platform "$platform" '.[$platform].SPDX | select(type == "object")' "$sbom_map_file" > "$sbom_file"
+		jq -e --arg platform "$platform" '.[$platform].SLSA | select(type == "object")' "$provenance_map_file" > "$provenance_file"
+		jq -e --arg revision "$merge_sha" --arg source "$source_url" '
+			.runDetails.metadata.buildkit_metadata.vcs.revision == $revision and
+			.runDetails.metadata.buildkit_metadata.vcs.source == $source and
+			.buildDefinition.externalParameters.request.args["build-arg:SOURCE_SHA"] == $revision
+		' "$provenance_file" >/dev/null || {
+			echo "BuildKit $platform provenance does not identify merge commit $merge_sha from $source_url" >&2
+			return 1
+		}
+		attest_and_verify "$child_ref" "$workflow_ref" https://spdx.dev/Document "$sbom_file" "$child_digest"
+		attest_and_verify "$child_ref" "$workflow_ref" https://slsa.dev/provenance/v0.2 "$provenance_file" "$child_digest"
+	done
 
 	scripts/reconcile-registry.sh version "$image" "$version" "$digest" "$intents_file" "$fail_after"
 	crane manifest "$ref" > "$work_dir/source-index.json"
@@ -264,8 +316,6 @@ publish_one() {
 		return 1
 	}
 	cosign verify --certificate-identity "$workflow_ref" --certificate-oidc-issuer "$oidc_issuer" "$image:$version"
-	cosign verify-attestation --type https://spdx.dev/Document --certificate-identity "$workflow_ref" --certificate-oidc-issuer "$oidc_issuer" "$image:$version"
-	cosign verify-attestation --type https://slsa.dev/provenance/v0.2 --certificate-identity "$workflow_ref" --certificate-oidc-issuer "$oidc_issuer" "$image:$version"
 
 	ensure_git_tag "$version" "$merge_sha"
 
