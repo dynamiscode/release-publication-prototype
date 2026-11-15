@@ -1,4 +1,6 @@
-/.github/workflows/release-prototype.yml @davidlondono
+/.github/ @davidlondono
+/Dockerfile @davidlondono
+/go.mod @davidlondono
 /cmd/ @davidlondono
 /internal/releaseplan/ @davidlondono
 /releases/ @davidlondono
