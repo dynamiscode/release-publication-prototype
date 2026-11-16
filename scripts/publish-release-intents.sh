@@ -60,11 +60,12 @@ attest_and_verify() {
 	local predicate_type=$3
 	local predicate_file=$4
 	local subject_digest=$5
-	local download_file error_file expected_error actual_error status
+	local download_file error_file expected_error expected_error_with_context actual_error status
 
 	download_file=$(mktemp "$work_dir/attestation.XXXXXX")
 	error_file=$(mktemp "$work_dir/attestation-error.XXXXXX")
 	expected_error="Error: no attestations with predicate type '$predicate_type' found"
+	expected_error_with_context=$(printf '%s\n%s' "$expected_error" "error during command execution: no attestations with predicate type '$predicate_type' found")
 	if cosign download attestation "$ref" --predicate-type "$predicate_type" >"$download_file" 2>"$error_file"; then
 		if [[ ! -s "$download_file" ]]; then
 			echo "Cosign attestation download returned no data for $predicate_type" >&2
@@ -76,8 +77,8 @@ attest_and_verify() {
 		fi
 	else
 		status=$?
-		actual_error=$(sed -E 's/^[0-9]{4}\/[0-9]{2}\/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} //' "$error_file")
-		if [[ -s "$download_file" || "$actual_error" != "$expected_error" ]]; then
+		actual_error=$(sed -E 's/^[0-9]{4}\/[0-9]{2}\/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} //' "$error_file" | sed '/^$/d')
+		if [[ -s "$download_file" || ( "$actual_error" != "$expected_error" && "$actual_error" != "$expected_error_with_context" ) ]]; then
 			cat "$error_file" >&2
 			return "$status"
 		fi
