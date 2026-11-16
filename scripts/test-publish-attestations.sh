@@ -45,7 +45,7 @@ case "$1" in
 			--slurpfile predicate "$predicate_file" \
 			'{predicateType:$predicate_type,subject:[{digest:{sha256:$subject_digest}}],predicate:$predicate[0]}')
 		payload=$(printf '%s' "$statement" | base64 | tr -d '\n')
-		printf '{"payload":"%s"}\n' "$payload" > "$MOCK_BUNDLE"
+		printf '{"dsseEnvelope":{"payload":"%s"}}\n' "$payload" > "$MOCK_BUNDLE"
 		printf 'attested\n' >> "$MOCK_COUNT"
 		;;
 	verify-attestation)

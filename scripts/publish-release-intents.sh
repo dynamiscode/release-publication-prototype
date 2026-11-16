@@ -45,7 +45,7 @@ attestation_matches() {
 		--arg subject_digest "${subject_digest#sha256:}" \
 		--slurpfile expected "$predicate_file" '
 			length > 0 and all(.[];
-				(.payload | @base64d | fromjson) as $statement
+				(.dsseEnvelope.payload | @base64d | fromjson) as $statement
 				| $statement.predicateType == $predicate_type
 				and ($statement.subject | length) == 1
 				and $statement.subject[0].digest.sha256 == $subject_digest
