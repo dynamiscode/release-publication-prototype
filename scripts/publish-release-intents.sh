@@ -250,8 +250,13 @@ publish_one() {
 				attestation_file="$work_dir/attestation.jsonl"
 				error_file="$work_dir/attestation.error"
 				if cosign download attestation "$child_ref" --predicate-type "$predicate_type" >"$attestation_file" 2>"$error_file"; then
-					printf 'Cosign attestations %s %s: ' "$platform" "$predicate_type"
-					jq -sc '[.[] | .payload | @base64d | fromjson | {predicateType, subject: [.subject[].digest], predicateKeys: (.predicate | keys)}]' "$attestation_file"
+					printf 'Cosign bundle metadata %s %s: ' "$platform" "$predicate_type"
+					jq -sc '[.[] | {keys: keys, payloadLength: (.payload | length)}]' "$attestation_file"
+					printf 'Cosign payload prefix %s %s: ' "$platform" "$predicate_type"
+					jq -r '.payload' "$attestation_file" |
+						while IFS= read -r payload; do
+							printf '%s' "$payload" | base64 -d | od -An -tx1 -N24
+						done
 				else
 					status=$?
 					printf 'Cosign download %s %s: status=%s stderr=%s\n' "$platform" "$predicate_type" "$status" "$(cat "$error_file")"
