@@ -15,12 +15,13 @@ dispatch_gate() {
 
 case "$mode" in
 prepare)
-	version=${VERSION:?VERSION required}
-	fail_after=${FAIL_AFTER:-none}
-	if [[ ! "$version" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-		echo "unsupported version: $version" >&2
-		exit 1
+	version_plan=$(go run ./cmd/nextversion "$GITHUB_SHA")
+	if [[ $(jq -r '.release' <<<"$version_plan") != true ]]; then
+		echo "No release-worthy Conventional Commits since the latest stable tag."
+		exit 0
 	fi
+	version=$(jq -r '.version' <<<"$version_plan")
+	fail_after=${FAIL_AFTER:-none}
 	case "$fail_after" in
 	none | after-candidate | after-version | after-release | after-first-alias) ;;
 	*)

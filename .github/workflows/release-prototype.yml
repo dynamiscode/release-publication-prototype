@@ -12,11 +12,6 @@ on:
           - refresh
           - gate
           - retry
-      version:
-        description: Stable synthetic release version
-        required: false
-        default: v0.1.0
-        type: string
       pr_number:
         description: Release PR number for gate
         required: false
@@ -60,12 +55,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.3
+          cache: false
       - name: Prepare release PR and dispatch exact-head gate
         env:
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
           FAIL_AFTER: ${{ inputs.fail_after }}
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
         run: ./scripts/release-pr.sh prepare
 
   release-gate:
@@ -93,6 +91,8 @@ jobs:
       - name: Test ordinary pull request
         if: github.event_name == 'pull_request'
         run: go test ./...
+      - name: Test release intent authorization scenarios
+        run: bash scripts/test-discover-release-intents.sh
 
   refresh:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'refresh'

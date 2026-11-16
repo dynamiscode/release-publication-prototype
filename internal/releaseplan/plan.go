@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 type Release struct {
@@ -30,6 +31,8 @@ var (
 	stableVersion = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 	sha256Digest  = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 	majorAlias    = regexp.MustCompile(`^v(0|[1-9][0-9]*)$`)
+	commitHeader  = regexp.MustCompile(`^([a-z][a-z0-9-]*)(\([^()\r\n]+\))?(!)?: .+`)
+	breakingNote  = regexp.MustCompile(`(?m)^BREAKING[- ]CHANGE:`)
 )
 
 type parsedVersion struct {
@@ -37,6 +40,86 @@ type parsedVersion struct {
 	minor uint64
 	patch uint64
 	text  string
+}
+
+// NextVersion derives the next stable version from commits since the latest stable tag.
+func NextVersion(tags, commitMessages []string) (string, bool, error) {
+	impact := 0
+	for _, message := range commitMessages {
+		header := commitHeader.FindStringSubmatch(strings.SplitN(message, "\n", 2)[0])
+		switch {
+		case len(header) == 4 && (header[3] == "!" || breakingNote.MatchString(message)):
+			impact = 3
+		case len(header) == 4 && header[1] == "feat" && impact < 2:
+			impact = 2
+		case len(header) == 4 && header[1] == "fix" && impact < 1:
+			impact = 1
+		}
+	}
+	if impact == 0 {
+		return "", false, nil
+	}
+
+	current, err := latestStableVersion(tags)
+	if err != nil {
+		return "", false, err
+	}
+	if current.text == "" {
+		return "v0.1.0", true, nil
+	}
+
+	switch impact {
+	case 3:
+		if current.major == 0 {
+			current.major = 1
+		} else if current.major == ^uint64(0) {
+			return "", false, fmt.Errorf("major version overflow")
+		} else {
+			current.major++
+		}
+		current.minor, current.patch = 0, 0
+	case 2:
+		if current.minor == ^uint64(0) {
+			return "", false, fmt.Errorf("minor version overflow")
+		}
+		current.minor++
+		current.patch = 0
+	case 1:
+		if current.patch == ^uint64(0) {
+			return "", false, fmt.Errorf("patch version overflow")
+		}
+		current.patch++
+	}
+	return fmt.Sprintf("v%d.%d.%d", current.major, current.minor, current.patch), true, nil
+}
+
+// LatestStableTag returns the highest reachable stable SemVer tag.
+func LatestStableTag(tags []string) (string, error) {
+	version, err := latestStableVersion(tags)
+	return version.text, err
+}
+
+func latestStableVersion(tags []string) (parsedVersion, error) {
+	var current parsedVersion
+	for _, tag := range tags {
+		match := stableVersion.FindStringSubmatch(tag)
+		if len(match) != 4 {
+			continue
+		}
+		values := make([]uint64, 3)
+		for i, part := range match[1:] {
+			value, err := strconv.ParseUint(part, 10, 64)
+			if err != nil {
+				return parsedVersion{}, fmt.Errorf("invalid stable tag %q: %w", tag, err)
+			}
+			values[i] = value
+		}
+		candidate := parsedVersion{major: values[0], minor: values[1], patch: values[2], text: tag}
+		if current.text == "" || compareVersion(candidate, current) > 0 {
+			current = candidate
+		}
+	}
+	return current, nil
 }
 
 func Reconcile(request Request) (Plan, error) {
