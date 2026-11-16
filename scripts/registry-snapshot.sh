@@ -27,6 +27,8 @@ while IFS= read -r tag; do
 		aliases=$(jq -c --arg alias "$tag" --arg digest "$digest" '. + {($alias):$digest}' <<<"$aliases")
 	elif [[ "$tag" == candidate-* ]]; then
 		continue
+	elif [[ "$tag" =~ ^sha256-[a-f0-9]{64}$ ]]; then
+		continue
 	else
 		echo "unsupported registry tag: $tag" >&2
 		exit 1
