@@ -10,9 +10,10 @@ Temporarily set the repository default branch to `prototype/merge-authorized`, t
 gh workflow run release-prototype.yml \
   --ref prototype/merge-authorized \
   -f mode=prepare \
-  -f version=v0.1.0 \
   -f fail_after=none
 ```
+
+The workflow derives the next stable version from Conventional Commits since the latest reachable stable tag. `feat` selects a minor bump, `fix` a patch bump, and a breaking change a major bump; the highest impact wins. The first release is `v0.1.0`; breaking changes before `v1.0.0` select `v1.0.0`. If no release-worthy commit exists, no PR is opened.
 
 Wait for the `release-gate` check, approve the bot-authored release PR as David, and merge it. The merge triggers publication from that exact merge commit.
 
