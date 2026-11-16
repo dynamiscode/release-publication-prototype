@@ -57,11 +57,39 @@ case "$1" in
 esac
 MOCK
 chmod +x "$mock_dir/cosign"
+cat > "$mock_dir/gh" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$1" == release && "$2" == view && "$MOCK_RELEASE_MODE" == draft ]]; then
+	printf '{"databaseId":447003394,"id":"RE_kwDOVvL_Es4apLsC","isDraft":true,"tagName":"v0.1.0","assets":[]}\n'
+	exit 0
+fi
+if [[ "$1" == release && "$2" == view && "$MOCK_RELEASE_MODE" == missing ]]; then
+	echo "release not found" >&2
+	exit 1
+fi
+echo "Unexpected gh command: $*" >&2
+exit 2
+MOCK
+chmod +x "$mock_dir/gh"
 export PATH="$mock_dir:$PATH"
 
 predicate_type=https://spdx.dev/Document
 predicate_file="$work_dir/predicate.json"
 printf '{"document":"expected"}\n' > "$predicate_file"
+release_json="$work_dir/release.json"
+release_error="$work_dir/release.error"
+export MOCK_RELEASE_MODE=draft
+read_release v0.1.0 "$release_json" "$release_error"
+jq -e '.id == 447003394 and .draft == true and .tag_name == "v0.1.0" and .assets == []' "$release_json" >/dev/null
+export MOCK_RELEASE_MODE=missing
+if read_release v0.1.1 "$release_json" "$release_error"; then
+	echo "Missing release was accepted" >&2
+	exit 1
+else
+	[[ $? == 1 ]]
+fi
 ref=ghcr.io/example/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 attest_and_verify "$ref" "$workflow_ref" "$predicate_type" "$predicate_file" "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

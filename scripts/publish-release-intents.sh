@@ -171,6 +171,23 @@ build_assets() {
 	)
 }
 
+read_release() {
+	local version=$1
+	local release_json=$2
+	local error_file=$3
+	local view_json="$release_json.view"
+
+	if gh release view "$version" --json databaseId,isDraft,tagName,assets > "$view_json" 2> "$error_file"; then
+		jq '{id: .databaseId, draft: .isDraft, tag_name: .tagName, assets: [.assets[] | {name}]}' "$view_json" > "$release_json"
+		return 0
+	fi
+	if grep -Fxq 'release not found' "$error_file"; then
+		return 1
+	fi
+	cat "$error_file" >&2
+	return 2
+}
+
 verify_or_sign_assets() {
 	local version=$1
 	local asset_dir=$2
@@ -251,7 +268,7 @@ publish_one() {
 	local intent=$1
 	local version merge_sha pr_number fail_after candidate_tag digest ref
 	local asset_dir existing_dir release_json release_error release_exists
-	local expected_names actual_names release_id
+	local expected_names actual_names release_id status
 	local index_file sbom_map_file provenance_map_file source_url platform child_digest child_ref sbom_file provenance_file
 
 	version=$(jq -r '.version' <<<"$intent")
@@ -329,17 +346,22 @@ publish_one() {
 	mkdir -p "$asset_dir" "$existing_dir"
 	build_assets "$version" "$merge_sha" "$digest" "$asset_dir"
 
-	if gh api "repos/$repo/releases/tags/$version" > "$release_json" 2> "$release_error"; then
+	if read_release "$version" "$release_json" "$release_error"; then
 		release_exists=true
-	elif grep -q 'HTTP 404' "$release_error"; then
-		release_exists=false
 	else
-		cat "$release_error" >&2
-		return 1
+		status=$?
+		if [[ "$status" == 1 ]]; then
+			release_exists=false
+		else
+			return "$status"
+		fi
 	fi
 	if [[ "$release_exists" == false ]]; then
 		gh release create "$version" --draft --verify-tag --title "$version" --notes "Synthetic release for PR #$pr_number at $merge_sha; image $ref."
-		gh api "repos/$repo/releases/tags/$version" > "$release_json"
+		read_release "$version" "$release_json" "$release_error" || {
+			echo "Created release $version could not be read back" >&2
+			return 1
+		}
 	elif [[ "$(jq -r '.draft' "$release_json")" == false ]]; then
 		expected_names=$(printf '%s\n' SHA256SUMS SHA256SUMS.sigstore.json release.json release.json.sigstore.json synthetic-linux-amd64.tar.gz synthetic-linux-amd64.tar.gz.sigstore.json synthetic-linux-arm64.tar.gz synthetic-linux-arm64.tar.gz.sigstore.json | jq -R . | jq -sc 'sort')
 		actual_names=$(jq -c '[.assets[].name] | sort' "$release_json")
@@ -349,7 +371,10 @@ publish_one() {
 		fi
 	fi
 	verify_or_sign_assets "$version" "$asset_dir" "$existing_dir" "$release_json" "$workflow_ref"
-	gh api "repos/$repo/releases/tags/$version" > "$release_json"
+	read_release "$version" "$release_json" "$release_error" || {
+		echo "Release $version could not be read back" >&2
+		return 1
+	}
 	expected_names=$(printf '%s\n' SHA256SUMS SHA256SUMS.sigstore.json release.json release.json.sigstore.json synthetic-linux-amd64.tar.gz synthetic-linux-amd64.tar.gz.sigstore.json synthetic-linux-arm64.tar.gz synthetic-linux-arm64.tar.gz.sigstore.json | jq -R . | jq -sc 'sort')
 	actual_names=$(jq -c '[.assets[].name] | sort' "$release_json")
 	if [[ "$actual_names" != "$expected_names" ]]; then
@@ -360,7 +385,10 @@ publish_one() {
 		release_id=$(jq -r '.id' "$release_json")
 		printf '{"draft":false}' | gh api --method PATCH "repos/$repo/releases/$release_id" --input - >/dev/null
 	fi
-	gh api "repos/$repo/releases/tags/$version" > "$release_json"
+	read_release "$version" "$release_json" "$release_error" || {
+		echo "Published release $version could not be read back" >&2
+		return 1
+	}
 	if [[ "$(jq -r '.draft' "$release_json")" != false ]] || [[ "$(jq -c '[.assets[].name] | sort' "$release_json")" != "$expected_names" ]]; then
 		echo "Release publish readback did not confirm complete published assets" >&2
 		return 1
