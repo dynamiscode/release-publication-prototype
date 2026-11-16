@@ -251,9 +251,9 @@ publish_one() {
 				error_file="$work_dir/attestation.error"
 				if cosign download attestation "$child_ref" --predicate-type "$predicate_type" >"$attestation_file" 2>"$error_file"; then
 					printf 'Cosign bundle metadata %s %s: ' "$platform" "$predicate_type"
-					jq -sc '[.[] | {keys: keys, payloadLength: (.payload | length)}]' "$attestation_file"
+					jq -sc '[.[] | {keys: keys, payloadLength: (.dsseEnvelope.payload | length)}]' "$attestation_file"
 					printf 'Cosign payload prefix %s %s: ' "$platform" "$predicate_type"
-					jq -r '.payload' "$attestation_file" |
+					jq -r '.dsseEnvelope.payload' "$attestation_file" |
 						while IFS= read -r payload; do
 							printf '%s' "$payload" | base64 -d | od -An -tx1 -N24
 						done
