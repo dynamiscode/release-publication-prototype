@@ -25,7 +25,7 @@ case "$1" in
 		if [[ -s "$MOCK_BUNDLE" ]]; then
 			cat "$MOCK_BUNDLE"
 		else
-			printf "Error: no attestations with predicate type '%s' found\n" "$predicate_type" >&2
+			printf "Error: no attestations with predicate type '%s' found\nerror during command execution: no attestations with predicate type '%s' found\n" "$predicate_type" "$predicate_type" >&2
 			exit 1
 		fi
 		;;
