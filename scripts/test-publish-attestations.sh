@@ -81,4 +81,23 @@ if attest_and_verify "$ref" "$workflow_ref" "$predicate_type" "$predicate_file" 
 fi
 [[ $(wc -l < "$MOCK_COUNT") -eq 1 ]]
 
-echo "Publisher attestation idempotency and conflict checks passed"
+tag_test_dir="$work_dir/tag-test"
+mkdir -p "$tag_test_dir"
+git init --bare "$tag_test_dir/remote.git" >/dev/null
+git init "$tag_test_dir/repo" >/dev/null
+(
+	export GIT_CONFIG_GLOBAL=/dev/null
+	export GIT_CONFIG_SYSTEM=/dev/null
+	export GITHUB_ACTOR=test-user
+	export GITHUB_ACTOR_ID=1234
+	cd "$tag_test_dir/repo"
+	git -c user.name=fixture -c user.email=fixture@example.com commit --allow-empty -m fixture >/dev/null
+	git remote add origin "$tag_test_dir/remote.git"
+	merge_sha=$(git rev-parse HEAD)
+	ensure_git_tag v0.0.1 "$merge_sha"
+	[[ $(git cat-file -t refs/tags/v0.0.1) == tag ]]
+	[[ $(git for-each-ref --format='%(taggername)|%(taggeremail)' refs/tags/v0.0.1) == \
+		'test-user|<1234+test-user@users.noreply.github.com>' ]]
+)
+
+echo "Publisher attestation and Git tag identity checks passed"

@@ -121,7 +121,9 @@ ensure_git_tag() {
 		return
 	fi
 
-	git tag -a "$version" "$merge_sha" -m "Release $version"
+	git -c user.name="$GITHUB_ACTOR" \
+		-c user.email="${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com" \
+		tag -a "$version" "$merge_sha" -m "Release $version"
 	git push origin "refs/tags/$version"
 }
 
